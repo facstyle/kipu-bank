@@ -5,7 +5,7 @@ pragma solidity >=0.8.0;
  
 
 /// @title KipuBank
-/// @author Nova (asistente)
+/// @author Felipe A. Cristaldo
 /// @notice Vault-like contract where users can deposit native ETH into a personal vault and withdraw up to a per-transaction threshold.
 /// @dev Uses custom errors, checks-effects-interactions, and a simple reentrancy guard. Bank cap is set at deployment. Withdrawal threshold is immutable.
 contract KipuBank {
@@ -246,3 +246,4 @@ contract KipuBank {
         _userWithdrawalCount[user] += 1;
     }
 }
+
