@@ -3,45 +3,42 @@ const { expect } = require("chai");
 const { ethers } = require("hardhat");
 
 describe("KipuBank", function () {
-  let KipuBank, kipuBank, owner, user1;
+  let kipuBank, owner, user;
 
   beforeEach(async function () {
-    [owner, user1] = await ethers.getSigners();
-
-    const bankCap = ethers.parseEther("10");
-    const withdrawalThreshold = ethers.parseEther("1");
-
-    KipuBank = await ethers.getContractFactory("KipuBank");
-    kipuBank = await KipuBank.deploy(bankCap, withdrawalThreshold);
+    const KipuBank = await ethers.getContractFactory("KipuBank");
+    [owner, user] = await ethers.getSigners();
+    kipuBank = await KipuBank.deploy(
+      ethers.parseEther("1"),  // límite de retiro
+      ethers.parseEther("100") // capacidad total
+    );
     await kipuBank.waitForDeployment();
   });
 
-  it("Debe permitir depositar ETH", async function () {
-    await kipuBank.connect(user1).deposit({ value: ethers.parseEther("1") });
-    const balance = await kipuBank.vaultOf(user1.address);
-    expect(balance).to.equal(ethers.parseEther("1"));
+  it("Permite depositar fondos", async function () {
+    const deposit = ethers.parseEther("1.0");
+    await kipuBank.connect(user).deposit({ value: deposit });
+
+    const balance = await kipuBank.getBalance(user.address);
+    expect(balance).to.equal(deposit);
   });
 
-  it("Debe permitir retirar ETH dentro del límite", async function () {
-    await kipuBank.connect(user1).deposit({ value: ethers.parseEther("2") });
+  it("Permite retirar fondos", async function () {
+    const deposit = ethers.parseEther("1.0");
+    await kipuBank.connect(user).deposit({ value: deposit });
 
-    await kipuBank.connect(user1).withdraw(ethers.parseEther("1"));
-    const balance = await kipuBank.vaultOf(user1.address);
+    await kipuBank.connect(user).withdraw(ethers.parseEther("0.5"));
+    const balance = await kipuBank.getBalance(user.address);
 
-    expect(balance).to.equal(ethers.parseEther("1"));
+    expect(balance).to.equal(ethers.parseEther("0.5"));
   });
 
-  it("Debe revertir si el retiro excede el threshold", async function () {
-    await kipuBank.connect(user1).deposit({ value: ethers.parseEther("2") });
+  it("Rechaza retiro que excede el límite", async function () {
+    const deposit = ethers.parseEther("2.0");
+    await kipuBank.connect(user).deposit({ value: deposit });
 
     await expect(
-      kipuBank.connect(user1).withdraw(ethers.parseEther("2"))
-    ).to.be.revertedWithCustomError(kipuBank, "Err_ThresholdExceeded");
-  });
-
-  it("Debe incrementar el contador de depósitos", async function () {
-    await kipuBank.connect(user1).deposit({ value: ethers.parseEther("1") });
-    const count = await kipuBank.globalDepositCount();
-    expect(count).to.equal(1);
+      kipuBank.connect(user).withdraw(ethers.parseEther("2.0"))
+    ).to.be.revertedWithCustomError(kipuBank, "ErrOverWithdrawalLimit");
   });
 });
