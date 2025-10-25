@@ -4,246 +4,163 @@
 pragma solidity >=0.8.0;
  
 
-/// @title KipuBank
+
+/// @title KipuBank - Banco descentralizado con límites de retiro y registro de actividad.
 /// @author Felipe A. Cristaldo
-/// @notice Vault-like contract where users can deposit native ETH into a personal vault and withdraw up to a per-transaction threshold.
-/// @dev Uses custom errors, checks-effects-interactions, and a simple reentrancy guard. Bank cap is set at deployment. Withdrawal threshold is immutable.
+/// @notice Permite a los usuarios depositar y retirar ETH dentro de límites definidos.
+/// @dev Cumple con buenas prácticas de seguridad y documentación NatSpec.
 contract KipuBank {
     /*//////////////////////////////////////////////////////////////
-                                 ERRORS
+                            📢 EVENTOS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Reverted when deposit would exceed the global bank cap.
-    /// @param attempted The attempted deposit amount.
-    /// @param availableRemaining How much capacity remains in the bank.
-    error Err_BankCapExceeded(uint256 attempted, uint256 availableRemaining);
+    /// @notice Emite un evento cuando un usuario realiza un depósito exitoso.
+    /// @param user Dirección del usuario que deposita.
+    /// @param amount Monto depositado.
+    event Deposit(address indexed user, uint256 amount);
 
-    /// @notice Reverted when a zero value is sent where > 0 is required.
-    error Err_ZeroAmount();
-
-    /// @notice Reverted when a user tries to withdraw more than their vault balance.
-    /// @param requested The requested amount.
-    /// @param balance The user's vault balance.
-    error Err_InsufficientBalance(uint256 requested, uint256 balance);
-
-    /// @notice Reverted when withdraw request exceeds per-transaction threshold.
-    /// @param requested The requested amount.
-    /// @param threshold The immutable per-transaction threshold.
-    error Err_WithdrawAboveThreshold(uint256 requested, uint256 threshold);
-
-    /// @notice Reverted when a native transfer fails.
-    /// @param to Recipient.
-    /// @param amount Amount attempted.
-    error Err_TransferFailed(address to, uint256 amount);
-
-    /// @notice Reverted on reentrancy attempt.
-    error Err_ReentrantCall();
-
-    /// @notice Reverted when direct plain transfers to contract are not allowed.
-    error Err_NoDirectTransfersAllowed();
+    /// @notice Emite un evento cuando un usuario realiza un retiro exitoso.
+    /// @param user Dirección del usuario que retira.
+    /// @param amount Monto retirado.
+    event Withdrawal(address indexed user, uint256 amount);
 
     /*//////////////////////////////////////////////////////////////
-                             STATE VARIABLES
+                            ❌ ERRORES PERSONALIZADOS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Global cap for the entire bank (sum of all vault balances).
+    /// @notice Se lanza cuando el propietario inicial es inválido (dirección cero).
+    error ErrInvalidOwner();
+
+    /// @notice Se lanza cuando el monto es cero o inválido.
+    error ErrZeroAmount();
+
+    /// @notice Se lanza cuando el usuario intenta retirar más de su balance.
+    error ErrInsufficientBalance();
+
+    /// @notice Se lanza cuando el monto de retiro supera el límite permitido.
+    error ErrOverWithdrawalLimit();
+
+    /// @notice Se lanza cuando se intenta superar el límite total del banco.
+    error ErrBankCapReached();
+
+    /*//////////////////////////////////////////////////////////////
+                            ⚙️ VARIABLES DE ESTADO
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Dirección del propietario del contrato.
+    address public immutable owner;
+
+    /// @notice Límite máximo de retiro por transacción (inmutable).
+    uint256 public immutable withdrawalLimit;
+
+    /// @notice Capacidad total máxima del banco en ETH.
     uint256 public immutable bankCap;
 
-    /// @notice Per-transaction withdrawal threshold (immutable).
-    uint256 public immutable withdrawalThreshold;
+    /// @notice Registro de balances de cada usuario.
+    mapping(address => uint256) private _balances;
 
-    /// @notice Mapping of user => vault balance (in wei).
-    mapping(address => uint256) private _vaults;
+    /// @notice Contador de depósitos realizados.
+    uint256 private _depositCount;
 
-    /// @notice Global total of all deposited balance (sum of vaults) to track usage versus bankCap.
-    uint256 private _totalVaultBalance;
-
-    /// @notice Global counters for number of successful deposits and withdrawals.
-    uint256 private _globalDepositCount;
-    uint256 private _globalWithdrawalCount;
-
-    /// @notice Per-user counters for number of deposits and withdrawals.
-    mapping(address => uint256) private _userDepositCount;
-    mapping(address => uint256) private _userWithdrawalCount;
-
-    /// @notice Reentrancy guard flag (simple).
-    bool private _locked;
+    /// @notice Contador de retiros realizados.
+    uint256 private _withdrawalCount;
 
     /*//////////////////////////////////////////////////////////////
-                                 EVENTS
+                            🏗️ CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Emitted when a user deposits ETH into their vault.
-    /// @param user The depositor's address.
-    /// @param amount The deposited amount.
-    /// @param newBalance The user's new vault balance after deposit.
-    event DepositMade(address indexed user, uint256 amount, uint256 newBalance);
-
-    /// @notice Emitted when a user withdraws ETH from their vault.
-    /// @param user The withdrawer's address.
-    /// @param amount The withdrawn amount.
-    /// @param newBalance The user's new vault balance after withdrawal.
-    event WithdrawalMade(address indexed user, uint256 amount, uint256 newBalance);
-
-    /*//////////////////////////////////////////////////////////////
-                               CONSTRUCTOR
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Deploy the bank with a global cap and per-transaction withdrawal threshold.
-    /// @param _bankCap Total cap (in wei) for sum of all vaults.
-    /// @param _withdrawalThreshold Per-transaction max withdrawal (in wei).
-    constructor(uint256 _bankCap, uint256 _withdrawalThreshold) {
-        require(_bankCap > 0, "bankCap>0"); // small sanity check; not user-facing string heavy
-        require(_withdrawalThreshold > 0, "threshold>0");
+    /// @param _withdrawalLimit Límite de retiro máximo por transacción.
+    /// @param _bankCap Capacidad total del banco.
+    /// @dev Valida los parámetros y asigna el owner.
+    constructor(uint256 _withdrawalLimit, uint256 _bankCap) {
+        if (msg.sender == address(0)) revert ErrInvalidOwner();
+        owner = msg.sender;
+        withdrawalLimit = _withdrawalLimit;
         bankCap = _bankCap;
-        withdrawalThreshold = _withdrawalThreshold;
-        _locked = false;
     }
 
     /*//////////////////////////////////////////////////////////////
-                              MODIFIERS
+                            🔐 MODIFICADORES
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Simple non-reentrant modifier.
-    modifier nonReentrant() {
-        if (_locked) revert Err_ReentrantCall();
-        _locked = true;
-        _;
-        _locked = false;
-    }
-
-    /// @notice Ensures amount is non-zero.
-    /// @param amount Value to check.
-    modifier positiveAmount(uint256 amount) {
-        if (amount == 0) revert Err_ZeroAmount();
+    /// @notice Restringe el acceso solo al propietario del contrato.
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert ErrInvalidOwner();
         _;
     }
 
     /*//////////////////////////////////////////////////////////////
-                           EXTERNAL / PUBLIC API
+                            💰 FUNCIONES PÚBLICAS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Deposit native ETH into caller's personal vault.
-    /// @dev Follows checks-effects-interactions: check bank cap, effects update state, then emit. No external calls here.
-    /// @dev Emits `DepositMade`.
-    function deposit() external payable positiveAmount(msg.value) {
-        // Check: bank cap
-        uint256 newTotal = _totalVaultBalance + msg.value;
-        if (newTotal > bankCap) {
-            uint256 remaining = bankCap - _totalVaultBalance;
-            revert Err_BankCapExceeded(msg.value, remaining);
-        }
+    /// @notice Permite depositar ETH en la bóveda personal.
+    /// @dev Usa patrón Checks-Effects-Interactions.
+    /// @dev Emite un evento al finalizar el depósito.
+    function deposit() external payable {
+        if (msg.value == 0) revert ErrZeroAmount();
+        if (address(this).balance > bankCap) revert ErrBankCapReached();
 
-        // Effects
-        _vaults[msg.sender] += msg.value;
-        _totalVaultBalance = newTotal;
+        _balances[msg.sender] += msg.value;
+        _incrementDepositCount();
 
-        // Update counters (private helper)
-        _incrementDepositCount(msg.sender);
-
-        // Interactions: none external (we only emit event)
-        emit DepositMade(msg.sender, msg.value, _vaults[msg.sender]);
+        emit Deposit(msg.sender, msg.value);
     }
 
-    /// @notice Withdraw up to the immutable per-transaction threshold from caller's vault.
-    /// @param amount The requested withdrawal amount (wei).
-    /// @dev Uses checks-effects-interactions and nonReentrant. Emits `WithdrawalMade`.
-    function withdraw(uint256 amount) external nonReentrant positiveAmount(amount) {
-        // Checks
-        if (amount > withdrawalThreshold) {
-            revert Err_WithdrawAboveThreshold(amount, withdrawalThreshold);
-        }
-        uint256 balance = _vaults[msg.sender];
-        if (amount > balance) {
-            revert Err_InsufficientBalance(amount, balance);
-        }
+    /// @notice Permite retirar ETH de la bóveda personal.
+    /// @param amount Monto a retirar.
+    /// @dev Verifica límites y disponibilidad.
+    function withdraw(uint256 amount) external {
+        if (amount == 0) revert ErrZeroAmount();
+        if (amount > withdrawalLimit) revert ErrOverWithdrawalLimit();
+        if (amount > _balances[msg.sender]) revert ErrInsufficientBalance();
 
-        // Effects
-        _vaults[msg.sender] = balance - amount;
-        _totalVaultBalance -= amount;
-        _incrementWithdrawalCount(msg.sender);
+        _balances[msg.sender] -= amount;
+        _incrementWithdrawalCount();
 
-        // Interaction: safe native transfer using call pattern
-        _safeSend(payable(msg.sender), amount);
+        (bool success, ) = payable(msg.sender).call{value: amount}("");
+        require(success, "Transfer failed");
 
-        emit WithdrawalMade(msg.sender, amount, _vaults[msg.sender]);
-    }
-
-    /// @notice Returns the vault balance of an account.
-    /// @param account Address to query.
-    /// @return balance Wei balance of the vault.
-    function vaultOf(address account) external view returns (uint256 balance) {
-        return _vaults[account];
-    }
-
-    /// @notice Returns the total sum of all vault balances.
-    /// @return totalVaultBalance The bank's used capacity in wei.
-    function totalVaultBalance() external view returns (uint256) {
-        return _totalVaultBalance;
-    }
-
-    /// @notice Returns the global number of deposits made.
-    function globalDepositCount() external view returns (uint256) {
-        return _globalDepositCount;
-    }
-
-    /// @notice Returns the global number of withdrawals made.
-    function globalWithdrawalCount() external view returns (uint256) {
-        return _globalWithdrawalCount;
-    }
-
-    /// @notice Returns how many deposits a specific user made.
-    /// @param user The address to query.
-    function userDepositCount(address user) external view returns (uint256) {
-        return _userDepositCount[user];
-    }
-
-    /// @notice Returns how many withdrawals a specific user made.
-    /// @param user The address to query.
-    function userWithdrawalCount(address user) external view returns (uint256) {
-        return _userWithdrawalCount[user];
+        emit Withdrawal(msg.sender, amount);
     }
 
     /*//////////////////////////////////////////////////////////////
-                         RECEIVE / FALLBACK HANDLING
+                            🔍 FUNCIONES DE VISTA
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Prevent plain transfers; force users to call deposit() so events and counters are updated.
-    receive() external payable {
-        revert Err_NoDirectTransfersAllowed();
+    /// @notice Consulta el balance de un usuario.
+    /// @param user Dirección del usuario a consultar.
+    /// @return El balance actual del usuario.
+    function getBalance(address user) external view returns (uint256) {
+        return _balances[user];
     }
 
-    fallback() external payable {
-        revert Err_NoDirectTransfersAllowed();
+    /// @notice Devuelve el número total de depósitos realizados.
+    function getDepositCount() external view returns (uint256) {
+        return _depositCount;
+    }
+
+    /// @notice Devuelve el número total de retiros realizados.
+    function getWithdrawalCount() external view returns (uint256) {
+        return _withdrawalCount;
     }
 
     /*//////////////////////////////////////////////////////////////
-                             PRIVATE HELPERS
+                            🔒 FUNCIONES PRIVADAS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Internal helper to safely send native ETH using call.
-    /// @param to Recipient payable address.
-    /// @param amount Wei amount to send.
-    /// @dev Reverts with Err_TransferFailed if the call didn't succeed.
-    function _safeSend(address payable to, uint256 amount) private {
-        (bool success, ) = to.call{value: amount}("");
-        if (!success) {
-            revert Err_TransferFailed(to, amount);
+    /// @dev Incrementa el contador de depósitos (usa unchecked para optimizar gas).
+    function _incrementDepositCount() private {
+        unchecked {
+            ++_depositCount;
         }
     }
 
-    /// @notice Increment deposit counters (global + per user).
-    /// @param user The depositor.
-    function _incrementDepositCount(address user) private {
-        _globalDepositCount += 1;
-        _userDepositCount[user] += 1;
-    }
-
-    /// @notice Increment withdrawal counters (global + per user).
-    /// @param user The withdrawer.
-    function _incrementWithdrawalCount(address user) private {
-        _globalWithdrawalCount += 1;
-        _userWithdrawalCount[user] += 1;
+    /// @dev Incrementa el contador de retiros (usa unchecked para optimizar gas).
+    function _incrementWithdrawalCount() private {
+        unchecked {
+            ++_withdrawalCount;
+        }
     }
 }
+
 
