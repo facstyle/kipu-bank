@@ -1,26 +1,23 @@
 // scripts/deploy.js
-const { ethers } = require("hardhat");
+const hre = require("hardhat");
 
 async function main() {
-  // Configurar parámetros de despliegue
-  const bankCap = ethers.parseEther("100"); // Cap global = 100 ETH
-  const withdrawalThreshold = ethers.parseEther("1"); // Máx retiro por transacción = 1 ETH
+  const withdrawalLimit = hre.ethers.parseEther("1"); // 1 ETH por retiro
+  const bankCap = hre.ethers.parseEther("100"); // Máximo 100 ETH en el banco
 
-  // Obtener factory del contrato
-  const KipuBank = await ethers.getContractFactory("KipuBank");
+  console.log("Desplegando KipuBank...");
 
-  console.log("🚀 Desplegando KipuBank...");
-  const kipuBank = await KipuBank.deploy(bankCap, withdrawalThreshold);
+  const KipuBank = await hre.ethers.getContractFactory("KipuBank");
+  const kipuBank = await KipuBank.deploy(withdrawalLimit, bankCap);
 
-  // Esperar confirmación
   await kipuBank.waitForDeployment();
 
-  console.log(`✅ KipuBank desplegado en: ${await kipuBank.getAddress()}`);
-  console.log(`   Límite global: ${ethers.formatEther(bankCap)} ETH`);
-  console.log(`   Límite retiro: ${ethers.formatEther(withdrawalThreshold)} ETH`);
+  console.log(`✅ KipuBank desplegado en: ${kipuBank.target}`);
 }
 
 main().catch((error) => {
   console.error(error);
   process.exitCode = 1;
 });
+
+
